@@ -1,0 +1,98 @@
+version: '3.8'
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: contacts-api-app
+    restart: unless-stopped
+    working_dir: /var/www
+    volumes:
+      - .:/var/www
+      - ./docker/php/local.ini:/usr/local/etc/php/conf.d/local.ini
+    networks:
+      - contacts-network
+    depends_on:
+      - db
+      - redis
+
+  nginx:
+    image: nginx:alpine
+    container_name: contacts-api-nginx
+    restart: unless-stopped
+    ports:
+      - "8000:80"
+    volumes:
+      - .:/var/www
+      - ./docker/nginx/default.conf:/etc/nginx/conf.d/default.conf
+    networks:
+      - contacts-network
+    depends_on:
+      - app
+
+  db:
+    image: mysql:8.0
+    container_name: contacts-api-db
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: contacts_db
+      MYSQL_USER: contacts_user
+      MYSQL_PASSWORD: contacts_pass
+      MYSQL_ROOT_PASSWORD: root_pass
+    ports:
+      - "3306:3306"
+    volumes:
+      - dbdata:/var/lib/mysql
+    networks:
+      - contacts-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: contacts-api-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    networks:
+      - contacts-network
+
+  queue:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: contacts-api-queue
+    restart: unless-stopped
+    working_dir: /var/www
+    volumes:
+      - .:/var/www
+    command: php artisan queue:work redis --sleep=3 --tries=3 --timeout=60
+    networks:
+      - contacts-network
+    depends_on:
+      - app
+      - redis
+
+  reverb:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: contacts-api-reverb
+    restart: unless-stopped
+    working_dir: /var/www
+    volumes:
+      - .:/var/www
+    command: php artisan reverb:start --host=0.0.0.0 --port=8080
+    ports:
+      - "8080:8080"
+    networks:
+      - contacts-network
+    depends_on:
+      - app
+
+networks:
+  contacts-network:
+    driver: bridge
+
+volumes:
+  dbdata:
+    driver: local

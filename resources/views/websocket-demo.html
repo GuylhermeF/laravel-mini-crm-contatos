@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Contacts Score Monitor — Real-time</title>
+    <script src="https://js.pusher.com/8.2.0/pusher.min.js"></script>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: 'Segoe UI', sans-serif; background: #0f172a; color: #e2e8f0; min-height: 100vh; padding: 2rem; }
+        h1 { font-size: 1.5rem; margin-bottom: 1.5rem; color: #38bdf8; }
+        .card { background: #1e293b; border-radius: 0.75rem; padding: 1.5rem; max-width: 640px; }
+        label { display: block; font-size: 0.85rem; color: #94a3b8; margin-bottom: 0.4rem; }
+        input { width: 100%; padding: 0.5rem 0.75rem; background: #0f172a; border: 1px solid #334155; border-radius: 0.5rem;
+                color: #e2e8f0; font-size: 1rem; margin-bottom: 1rem; }
+        button { padding: 0.6rem 1.5rem; background: #0ea5e9; border: none; border-radius: 0.5rem;
+                 color: #fff; font-size: 1rem; cursor: pointer; transition: background 0.2s; }
+        button:hover { background: #0284c7; }
+        #log { margin-top: 1.5rem; max-height: 340px; overflow-y: auto; }
+        .event { padding: 0.75rem; border-radius: 0.5rem; margin-bottom: 0.6rem; background: #0f172a;
+                 border-left: 3px solid #0ea5e9; font-size: 0.9rem; }
+        .event.active  { border-color: #22c55e; }
+        .event.failed  { border-color: #ef4444; }
+        .event.processing { border-color: #f59e0b; }
+        .badge { display: inline-block; padding: 0.1rem 0.5rem; border-radius: 9999px; font-size: 0.75rem;
+                 font-weight: 600; margin-left: 0.4rem; }
+        .badge.active { background: #166534; color: #86efac; }
+        .badge.failed { background: #7f1d1d; color: #fca5a5; }
+        .badge.processing { background: #78350f; color: #fde68a; }
+        .badge.pending { background: #1e3a5f; color: #93c5fd; }
+        .score { font-size: 1.4rem; font-weight: 700; color: #38bdf8; }
+        .empty { color: #475569; text-align: center; padding: 2rem 0; font-size: 0.9rem; }
+        .status-indicator { width: 10px; height: 10px; border-radius: 50%; display: inline-block;
+                            background: #ef4444; margin-right: 6px; }
+        .status-indicator.connected { background: #22c55e; animation: pulse 2s infinite; }
+        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+        .connection-bar { display: flex; align-items: center; font-size: 0.8rem; color: #64748b; margin-bottom: 1.2rem; }
+    </style>
+</head>
+<body>
+<h1>📡 Contact Score Monitor</h1>
+
+<div class="card">
+    <div class="connection-bar">
+        <span class="status-indicator" id="indicator"></span>
+        <span id="conn-status">Disconnected</span>
+    </div>
+
+    <label>Contact ID</label>
+    <input type="number" id="contactId" placeholder="e.g. 1" min="1">
+
+    <button onclick="subscribe()">Subscribe to updates</button>
+
+    <div id="log">
+        <p class="empty">No events yet. Subscribe to a contact and trigger score processing.</p>
+    </div>
+</div>
+
+<script>
+    // ---------------------------------------------------------------
+    // CONFIG — adjust to match your .env values
+    // ---------------------------------------------------------------
+    const REVERB_HOST   = 'localhost';
+    const REVERB_PORT   = 8080;
+    const REVERB_APP_KEY = 'contacts-key';   // REVERB_APP_KEY in .env
+    // ---------------------------------------------------------------
+
+    let pusher = null;
+    let currentChannel = null;
+
+    function connect() {
+        if (pusher) return;
+
+        pusher = new Pusher(REVERB_APP_KEY, {
+            wsHost: REVERB_HOST,
+            wsPort: REVERB_PORT,
+            wssPort: REVERB_PORT,
+            forceTLS: false,
+            enabledTransports: ['ws', 'wss'],
+            cluster: 'mt1', // required by Pusher.js, ignored by Reverb
+        });
+
+        pusher.connection.bind('connected', () => {
+            document.getElementById('indicator').classList.add('connected');
+            document.getElementById('conn-status').textContent = 'Connected to Reverb';
+        });
+
+        pusher.connection.bind('disconnected', () => {
+            document.getElementById('indicator').classList.remove('connected');
+            document.getElementById('conn-status').textContent = 'Disconnected';
+        });
+    }
+
+    function subscribe() {
+        const id = document.getElementById('contactId').value;
+        if (!id) { alert('Enter a Contact ID first.'); return; }
+
+        connect();
+
+        if (currentChannel) {
+            currentChannel.unbind_all();
+            pusher.unsubscribe(currentChannel.name);
+        }
+
+        const channelName = `contacts.${id}`;
+        currentChannel = pusher.subscribe(channelName);
+
+        currentChannel.bind('score.updated', (data) => {
+            addEvent(data.contact);
+        });
+
+        addSystemMsg(`Subscribed to channel: ${channelName}`);
+    }
+
+    function addEvent(contact) {
+        const log = document.getElementById('log');
+        const empty = log.querySelector('.empty');
+        if (empty) empty.remove();
+
+        const div = document.createElement('div');
+        div.className = `event ${contact.status}`;
+        div.innerHTML = `
+            <strong>${contact.name}</strong>
+            <span class="badge ${contact.status}">${contact.status.toUpperCase()}</span>
+            <br>
+            <small style="color:#94a3b8">${contact.email}</small>
+            <br>
+            <span class="score">Score: ${contact.score}</span>
+            <br>
+            <small style="color:#475569">Processed at: ${contact.processed_at ?? '—'}</small>
+        `;
+        log.prepend(div);
+    }
+
+    function addSystemMsg(msg) {
+        const log = document.getElementById('log');
+        const empty = log.querySelector('.empty');
+        if (empty) empty.remove();
+
+        const div = document.createElement('div');
+        div.className = 'event';
+        div.style.borderColor = '#6366f1';
+        div.innerHTML = `<small style="color:#818cf8">ℹ️ ${msg}</small>`;
+        log.prepend(div);
+    }
+</script>
+</body>
+</html>

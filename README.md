@@ -1,99 +1,276 @@
-# Desafio Técnico – Mini CRM de Contatos (DDD & TDD)
+# Contacts API
 
-Este desafio tem como objetivo avaliar suas habilidades avançadas em engenharia de software, design de arquitetura e fluência no ecossistema Laravel. 
-
-Você deverá construir uma pequena API REST para gerenciar contatos e acompanhar, em tempo real, a evolução do **score** (pontuação) desses contatos quando um processamento assíncrono for executado.
-
-**O foco principal não é apenas entregar a funcionalidade, mas como você estrutura o código.** Esperamos ver a aplicação de **SOLID**, **Domain-Driven Design (DDD)** (ou Arquitetura Hexagonal/Clean Architecture) e **Test-Driven Development (TDD)**.
+API REST para gerenciamento de contatos com cálculo assíncrono de score, construída com Laravel 11 seguindo os princípios de **DDD (Domain-Driven Design)**, **SOLID** e **TDD**.
 
 ---
 
-## 1. Escopo Funcional
+## 🏗️ Arquitetura
 
-### Modelo `Contact`
+O projeto segue uma **Arquitetura em Camadas** inspirada em DDD / Clean Architecture:
 
-| Campo          | Tipo               | Regras / Default                           |
-|----------------|--------------------|--------------------------------------------|
-| `id`           | bigint / PK        | auto-increment                             |
-| `name`         | string             | obrigatório                                |
-| `email`        | string único       | obrigatório \| formato e-mail              |
-| `phone`        | string             | obrigatório                                |
-| `score`        | integer            | default **0**                              |
-| `status`       | string (Enum)      | `pending`, `processing`, `active`, `failed`|
-| `processed_at` | timestamp nullable | preenchido após processamento do score     |
-| Timestamps     | `created_at`, `updated_at`, `deleted_at` (soft delete)            |
+```
+src/
+├── Domain/Contact/          # Regras de negócio puras (sem framework)
+│   ├── Entities/            # Contact — entidade rica com comportamento
+│   ├── ValueObjects/        # Email, Phone, ContactName, Score
+│   ├── Enums/               # ContactStatus (Backed Enum)
+│   ├── Events/              # ContactScoreProcessed (domain event)
+│   ├── Exceptions/          # Exceções de domínio
+│   ├── Repositories/        # Interface ContactRepositoryInterface
+│   └── Services/            # ScoreCalculatorService + Strategies (Strategy Pattern)
+│
+├── Application/             # Casos de uso — orquestram o domínio
+│   ├── UseCases/Contact/    # Create, Update, Delete, Get, List, ProcessScore, TriggerProcessing
+│   └── DTOs/                # CreateContactDTO, UpdateContactDTO
+│
+└── Infrastructure/          # Detalhes de implementação (Laravel)
+    ├── Http/
+    │   ├── Controllers/     # ContactController (thin controller)
+    │   ├── Requests/        # Form Requests com validação
+    │   └── Resources/       # ContactResource (API Resource)
+    ├── Persistence/Eloquent/ # ContactModel + EloquentContactRepository
+    ├── Queue/Jobs/          # ProcessContactScoreJob
+    ├── Events/              # ContactScoreUpdated (Broadcast event)
+    ├── Listeners/           # ContactScoreProcessedListener (log + broadcast)
+    └── Providers/           # ContactServiceProvider (DI), EventServiceProvider
+```
 
-### Endpoints CRUD
+### Padrões aplicados
 
-| Método | Rota                      | Ação                     |
-|--------|---------------------------|--------------------------|
-| POST   | `/api/contacts`           | Criar contato (inicia como `pending` e score 0) |
-| GET    | `/api/contacts`           | Listar contatos (com paginação) |
-| GET    | `/api/contacts/{id}`      | Mostrar contato          |
-| PUT    | `/api/contacts/{id}`      | Atualizar contato        |
-| DELETE | `/api/contacts/{id}`      | Excluir contato (soft)   |
-
-### Fluxo de Processamento de Score (Regras de Negócio)
-
-1. **Endpoint de Gatilho**
-   `POST /api/contacts/{id}/process-score`
-
-2. **Processamento Assíncrono (Job)**
-   A rota deve enfileirar o processamento. O Job mudará o status do contato para `processing`.
-
-3. **Cálculo do Score (Domínio)**
-   O score não é aleatório. Ele deve ser calculado por um **Domain Service** ou **Use Case** isolado, baseado nas seguintes regras de negócio (utilize padrões como *Strategy* para permitir fácil extensão futura):
-   - **E-mail**: Domínios corporativos (não gmail, hotmail, yahoo) ganham +20 pontos. E-mails terminados em `.br` ganham +10 pontos.
-   - **Nome**: Nomes completos (com mais de uma palavra) ganham +10 pontos.
-   - **Telefone**: Se possuir código de área (DDD) válido do estado de São Paulo (11 a 19), ganha +20 pontos. Se for de outros estados, +10 pontos.
-   - *(A carga de cálculo pode ser simulada com um `sleep(1)` ou `sleep(2)` para emular demora e validar o fluxo assíncrono).*
-
-4. **Finalização**
-   - O status do contato passa para `active` (ou `failed` caso ocorra alguma falha na regra).
-   - O score calculado é salvo e a data em `processed_at` é preenchida.
-   - Um evento de domínio `ContactScoreProcessed` é disparado.
-
-5. **Reação ao Evento (Listeners & WebSockets)**
-   - **Log**: Um Listener grava no arquivo `storage/logs/contact.log` (ID, email, novo score, status).
-   - **Broadcast via Reverb**: A atualização do contato deve ser enviada para o frontend via websockets (canal `contacts.{id}`).
+| Padrão | Onde |
+|---|---|
+| **Strategy** | `ScoreCalculatorService` + `EmailScoreStrategy`, `NameScoreStrategy`, `PhoneScoreStrategy` |
+| **Value Object** | `Email`, `Phone`, `ContactName`, `Score` — imutáveis, com regras próprias |
+| **Repository** | `ContactRepositoryInterface` / `EloquentContactRepository` |
+| **Use Case / Application Service** | Uma classe por operação (`CreateContactUseCase`, etc.) |
+| **Domain Event** | `ContactScoreProcessed` disparado após processamento |
+| **Observer** (Model Event) | `ContactModel::booted()` normaliza o telefone no `saving` |
 
 ---
 
-## 2. Requisitos Arquiteturais e Técnicos
+## 🚀 Setup com Docker
 
-Esperamos que sua solução se afaste do padrão clássico MVC "fat-controller / fat-model" do Laravel e utilize conceitos de **DDD / Arquitetura Limpa**.
+### 1. Clone e configure o ambiente
 
-| Área | Requisito Esperado |
-| :--- | :--- |
-| **Domain Layer** | Suas regras de negócio (ex: cálculo do score, mudança de status) devem ser **agnósticas ao framework**. Utilize entidades ricas e *Value Objects* (ex: para Email, Phone, Status). |
-| **Application Layer** | Implemente *Use Cases* (ou *Actions*) para orquestrar as operações (ex: `CreateContactUseCase`, `CalculateScoreUseCase`). |
-| **Infrastructure Layer** | Aqui entram os recursos do Laravel: Controllers, Repositórios (Eloquent), Jobs, Events, Listeners e Requests. |
-| **Inversão de Dependência** | Utilize Interfaces para acoplar os *Use Cases* à infraestrutura (Repositories). Configure as dependências no *Service Container* do Laravel. |
-| **Validação e Saída** | Use **Form Requests** para validação de entrada (HTTP) e **API Resources** para padronizar o JSON de saída. |
-| **Queue & Broadcast** | Use **Redis** para a fila e **Laravel Reverb** para o WebSocket. Inclua um exemplo simples (HTML/JS) no `README` de como escutar o canal. |
+```bash
+git clone <repo-url> contacts-api
+cd contacts-api
+
+cp .env.example .env
+```
+
+### 2. Suba os containers
+
+```bash
+docker compose up -d --build
+```
+
+Isso inicia:
+- **app** — PHP-FPM 8.2
+- **nginx** — proxy reverso na porta `8000`
+- **db** — MySQL 8.0 na porta `3306`
+- **redis** — Redis 7 na porta `6379`
+- **queue** — worker `php artisan queue:work redis`
+- **reverb** — WebSocket server na porta `8080`
+
+### 3. Instale as dependências e gere a chave
+
+```bash
+# O Dockerfile usa --no-dev, então este passo instala as dependências de desenvolvimento
+# (phpunit, faker, mockery) necessárias para rodar os testes
+docker compose exec app composer install
+docker compose exec app php artisan key:generate
+```
+
+### 4. Execute as migrations
+
+```bash
+docker compose exec app php artisan migrate
+```
+
+### 5. Verifique que tudo está rodando
+
+```bash
+curl http://localhost:8000/up
+# → {"status": "ok"}
+```
 
 ---
 
-## 3. Critérios de Avaliação
+## ✅ Rodando os testes
 
-Avaliaremos severamente a qualidade do seu código, não apenas se a API "funciona".
+> **Atenção:** o Step 3 do setup (`composer install`) é obrigatório antes de rodar os testes. Sem ele, o PHPUnit não estará disponível pois o Dockerfile instala apenas dependências de produção.
 
-| Peso | Critério                                                                                         |
-|------|--------------------------------------------------------------------------------------------------|
-| ⭐⭐⭐  | **Arquitetura & SOLID**: Separação clara entre Domínio, Aplicação e Infraestrutura. Correto uso de injeção de dependência e segregação de responsabilidades. |
-| ⭐⭐⭐  | **Testes (TDD)**: Seu histórico de commits deve preferencialmente demonstrar o ciclo red-green-refactor. Exigimos **Testes de Unidade** para a camada de Domínio/Aplicação (mockando infraestrutura) e **Testes de Integração (Feature)** para os endpoints e integração com banco/filas. |
-| ⭐⭐   | **Design de Código (Design Patterns)**: Uso adequado de padrões como *Strategy*, *Value Objects* e *Repository Pattern*. Entidades anêmicas custarão pontos. |
-| ⭐⭐   | **Fluência no Laravel**: Uso correto de Form Requests, API Resources, Jobs, Events/Listeners, Reverb e Observers (ex: `saving` para normalizar o formato do telefone). |
-| ⭐    | **Documentação & Setup**: Clareza no README.md ensinando a subir o ambiente (Laravel Sail ou Docker Compose customizado), rodar migrations, filas, websockets e rodar os testes. |
+```bash
+# Todos os testes (Unit + Feature)
+docker compose exec app php artisan test
+
+# Apenas testes unitários (sem banco)
+docker compose exec app php artisan test --testsuite=Unit
+
+# Apenas testes de integração
+docker compose exec app php artisan test --testsuite=Feature
+
+# Com cobertura
+docker compose exec app php artisan test --coverage
+```
+
+Os testes de Feature usam **SQLite em memória** (configurado no `phpunit.xml`), portanto não dependem do MySQL.
 
 ---
 
-## 4. Instruções de Entrega
+## 📡 Endpoints da API
 
-1. **Faça um fork/clone** deste repositório e inicie o desenvolvimento.
-2. Certifique-se de que os testes podem ser executados facilmente por quem for avaliar o teste (ex: `php artisan test`).
-3. Faça *commits* semânticos e granulares que demonstrem sua linha de raciocínio e a adoção do TDD.
-4. Quando finalizar, publique em um repositório seu (pode ser privado, basta nos dar acesso) e nos envie o link.
-5. **Prazo de entrega sugerido**: 7 dias. Foque na qualidade da arquitetura e dos testes, mesmo que o escopo funcional não esteja 100% polido.
+Base URL: `http://localhost:8000/api`
 
-Boa sorte 🚀
+| Método | Rota | Ação |
+|---|---|---|
+| `POST` | `/contacts` | Criar contato |
+| `GET` | `/contacts` | Listar contatos (paginado) |
+| `GET` | `/contacts/{id}` | Exibir contato |
+| `PUT` | `/contacts/{id}` | Atualizar contato |
+| `DELETE` | `/contacts/{id}` | Excluir contato (soft delete) |
+| `POST` | `/contacts/{id}/process-score` | Enfileirar cálculo de score |
+
+### Exemplos
+
+**Criar contato**
+```bash
+curl -X POST http://localhost:8000/api/contacts \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "João Silva",
+    "email": "joao@empresa.com.br",
+    "phone": "(11) 98765-4321"
+  }'
+```
+
+**Listar com paginação**
+```bash
+curl "http://localhost:8000/api/contacts?page=1&per_page=10"
+```
+
+**Disparar processamento de score**
+```bash
+curl -X POST http://localhost:8000/api/contacts/1/process-score
+```
+
+---
+
+## 🧮 Regras de Cálculo do Score
+
+| Critério | Pontos |
+|---|---|
+| E-mail com domínio corporativo (não gmail/hotmail/yahoo) | +20 |
+| E-mail com domínio `.br` | +10 |
+| Nome completo (mais de uma palavra) | +10 |
+| DDD do estado de SP (11–19) | +20 |
+| DDD de outro estado | +10 |
+| **Score máximo possível** | **60** |
+
+O cálculo é feito via **Strategy Pattern** — cada critério é uma classe independente que implementa `ScoreStrategyInterface`. Para adicionar um novo critério, basta criar uma nova estratégia e registrá-la no `ContactServiceProvider`.
+
+---
+
+## 📺 WebSocket em tempo real (Laravel Reverb)
+
+Após disparar `POST /api/contacts/{id}/process-score`, o job processa o score de forma assíncrona e emite o evento `score.updated` no canal `contacts.{id}`.
+
+### Escutando com JavaScript (Pusher.js → Reverb)
+
+```html
+<script src="https://js.pusher.com/8.2.0/pusher.min.js"></script>
+<script>
+const pusher = new Pusher('contacts-key', {  // REVERB_APP_KEY
+    wsHost: 'localhost',
+    wsPort: 8080,
+    forceTLS: false,
+    enabledTransports: ['ws', 'wss'],
+    cluster: 'mt1',
+});
+
+const channel = pusher.subscribe('contacts.1'); // canal do contato ID=1
+
+channel.bind('score.updated', function(data) {
+    console.log('Score atualizado:', data.contact);
+    // { id, name, email, score, status, processed_at }
+});
+</script>
+```
+
+Uma página de demonstração completa está disponível em `resources/views/websocket-demo.html`.
+
+Abra-a diretamente no browser — sem precisar de build — após subir os containers.
+
+---
+
+## 📋 Logs
+
+O listener `ContactScoreProcessedListener` grava em `storage/logs/contact.log`:
+
+```
+[2024-01-15 10:30:00] contact.INFO: Contact score processed
+    {"id":1,"email":"joao@empresa.com.br","score":60,"status":"active"}
+```
+
+Para acompanhar em tempo real:
+```bash
+docker compose exec app tail -f storage/logs/contact.log
+```
+
+---
+
+## 🔧 Comandos úteis
+
+```bash
+# Reiniciar o queue worker
+docker compose restart queue
+
+# Ver logs do app
+docker compose logs -f app
+
+# Entrar no container
+docker compose exec app bash
+
+# Limpar cache
+docker compose exec app php artisan cache:clear
+
+# Rodar Pint (code style)
+docker compose exec app ./vendor/bin/pint
+```
+
+---
+
+## 🧪 Estrutura dos Testes
+
+```
+tests/
+├── Unit/
+│   ├── Domain/
+│   │   ├── ContactEntityTest.php        # Comportamento da entidade (transições de status)
+│   │   ├── ContactStatusTest.php        # Lógica do Enum de status
+│   │   ├── ScoreCalculatorServiceTest.php # Strategies de cálculo de score
+│   │   ├── ContactNameTest.php          # Value Object ContactName
+│   │   ├── ScoreTest.php                # Value Object Score
+│   │   └── EmailTest.php                # Value Object Email
+│   │   └── PhoneTest.php                # Value Object Phone
+│   └── Application/
+│       ├── CreateContactUseCaseTest.php # Use case com repositório mockado
+│       └── ProcessContactScoreUseCaseTest.php
+└── Feature/
+    ├── ContactCrudTest.php              # Endpoints CRUD (banco real em memória)
+    ├── ContactScoreProcessingTest.php   # Job + cálculo integrado
+    └── ContactScoreProcessedListenerTest.php # Listener + evento de domínio
+```
+
+---
+
+## 📦 Variáveis de ambiente principais
+
+| Variável | Padrão | Descrição |
+|---|---|---|
+| `QUEUE_CONNECTION` | `redis` | Driver da fila |
+| `BROADCAST_CONNECTION` | `reverb` | Driver de broadcast |
+| `REVERB_APP_KEY` | `contacts-key` | Chave pública do Reverb |
+| `REVERB_PORT` | `8080` | Porta do WebSocket |
+| `DB_CONNECTION` | `mysql` | Driver do banco |
